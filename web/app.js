@@ -306,6 +306,17 @@ async function analyzeLeague(league) {
     t.surplus = surplus;
   }
 
+  // Every player id that sits on any roster (starters, bench, IR, taxi) — used
+  // to tell free agents apart from rostered players for the waiver views.
+  const rosteredIds = new Set();
+  for (const r of rosters) {
+    for (const key of ["starters", "players", "reserve", "taxi"]) {
+      for (const pid of r[key] || []) {
+        if (pid && pid !== "0") rosteredIds.add(String(pid));
+      }
+    }
+  }
+
   return {
     league,
     value_settings: settings,
@@ -315,6 +326,7 @@ async function analyzeLeague(league) {
     players,
     valueOf,
     byNamePos,
+    rosteredIds,
   };
 }
 
@@ -526,6 +538,83 @@ function findTargets(analysis, myTeam, maxPartners = 4) {
 }
 
 // --------------------------------------------------------------------------- //
+// Waiver wire / trends (built from FantasyCalc values + league rosters)
+// --------------------------------------------------------------------------- //
+/** Pure: turn the FantasyCalc value rows + league analysis into the three
+ * waiver panels. Kept separate from the fetch so it's unit-testable. */
+function computeWaivers(rows, analysis, topN = 5) {
+  const rostered = analysis.rosteredIds || new Set();
+  const byPosGroups = (make) => {
+    const g = {};
+    for (const pos of CORE_POS) g[pos] = [];
+    make(g);
+    return g;
+  };
+
+  // Index every value row by sleeperId so we can attach position rank to
+  // rostered/bench players too.
+  const bySid = {};
+  const free = byPosGroups((g) => {
+    for (const row of rows) {
+      const pl = row.player || {};
+      const pos = (pl.position || "").toUpperCase();
+      const sid = pl.sleeperId != null ? String(pl.sleeperId) : null;
+      if (sid) bySid[sid] = row;
+      if (!g[pos]) continue;
+      if (sid && rostered.has(sid)) continue; // rostered => not a free agent
+      g[pos].push({
+        name: pl.name,
+        pos,
+        team: pl.maybeTeam || "FA",
+        value: row.value || 0,
+        posRank: row.positionRank != null ? row.positionRank : null,
+        trend: row.trend30Day || 0,
+      });
+    }
+  });
+
+  const waiver = {};
+  const risers = {};
+  for (const pos of CORE_POS) {
+    waiver[pos] = free[pos].slice().sort((a, b) => b.value - a.value).slice(0, topN);
+    risers[pos] = free[pos]
+      .slice()
+      .filter((p) => p.trend !== 0)
+      .sort((a, b) => b.trend - a.trend)
+      .slice(0, topN);
+  }
+
+  // Highest-value players sitting on benches across the whole league.
+  const bench = byPosGroups((g) => {
+    for (const t of analysis.teams) {
+      for (const p of t.bench) {
+        if (!g[p.pos]) continue;
+        const row = bySid[p.player_id];
+        g[p.pos].push({
+          name: p.name,
+          pos: p.pos,
+          team: p.team,
+          value: p.value,
+          posRank: row && row.positionRank != null ? row.positionRank : null,
+          owner: t.owner_name,
+        });
+      }
+    }
+  });
+  for (const pos of CORE_POS) {
+    bench[pos] = bench[pos].sort((a, b) => b.value - a.value).slice(0, topN);
+  }
+
+  return { waiver, risers, bench };
+}
+
+async function buildWaivers(analysis) {
+  const vs = analysis.value_settings;
+  const rows = (await loadValues(vs.num_qbs, vs.num_teams, vs.ppr, vs.is_dynasty)) || [];
+  return computeWaivers(rows, analysis);
+}
+
+// --------------------------------------------------------------------------- //
 // League resolution + top-level orchestration
 // --------------------------------------------------------------------------- //
 async function resolveLeague(cfg) {
@@ -707,6 +796,41 @@ function renderTargets(suggestions) {
   return intro + cards;
 }
 
+function renderWaivers(data) {
+  const rankBadge = (pos, rank) =>
+    rank != null ? `<span class="rankbadge">${esc(pos)}${rank}</span>` : "";
+
+  const rowHtml = (r, i, opts) => `<div class="wrow">
+      <span class="wrank">${i + 1}.</span>
+      <span class="wname">${esc(r.name)}</span>
+      ${rankBadge(r.pos, r.posRank)}
+      ${opts.owner && r.owner ? `<span class="wowner">${esc(r.owner)}</span>` : ""}
+      <span class="wspacer"></span>
+      ${opts.trend && r.trend ? `<span class="wtrend">+${r.trend}</span>` : ""}
+      <span class="wval">${r.value}</span>
+    </div>`;
+
+  const posBlock = (pos, rows, opts) => `<div class="wblock">
+      <div class="wpos">${esc(pos)}</div>
+      ${
+        rows && rows.length
+          ? rows.map((r, i) => rowHtml(r, i, opts)).join("")
+          : '<div class="meta wempty">(none)</div>'
+      }
+    </div>`;
+
+  const panel = (title, sub, byPos, opts) => `<div class="card waiver-col">
+      <h3 class="waiver-title">${esc(title)}${sub ? ` <span class="waiver-sub">${esc(sub)}</span>` : ""}</h3>
+      ${CORE_POS.map((pos) => posBlock(pos, byPos[pos], opts)).join("")}
+    </div>`;
+
+  return `<div class="waiver-grid">
+    ${panel("Waiver Wire", "", data.waiver, {})}
+    ${panel("Top Waiver Risers", "(30 day)", data.risers, { trend: true })}
+    ${panel("Top Bench Players", "", data.bench, { owner: true })}
+  </div>`;
+}
+
 function renderEvaluation(ev, missing) {
   const pct = ev.value_delta_pct;
   const cls = pct >= 5 ? "win" : pct <= -5 ? "lose" : "even";
@@ -829,6 +953,8 @@ async function run(tab) {
       setResult(renderLeague(analysis));
     } else if (tab === "targets") {
       setResult(renderTargets(findTargets(analysis, myTeam)));
+    } else if (tab === "waivers") {
+      setResult(renderWaivers(await buildWaivers(analysis)));
     } else if (tab === "evaluate") {
       const giveNames = document.getElementById("give").value.split(",").map((s) => s.trim()).filter(Boolean);
       const getNames = document.getElementById("get").value.split(",").map((s) => s.trim()).filter(Boolean);
