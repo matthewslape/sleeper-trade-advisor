@@ -1,0 +1,6 @@
+{
+  "_comment": "Your Sleeper identity. username is REQUIRED (case-sensitive, exactly as it appears in Sleeper). league_id is optional: if you leave it empty and you're in exactly one NFL league this season, it's auto-detected; if you're in several, the skill will list them so you can paste the right id here. Find league_id in your league's web URL: sleeper.com/leagues/<league_id>/team. season is optional and defaults to the current NFL season.",
+  "username": "",
+  "league_id": "",
+  "season": ""
+}
