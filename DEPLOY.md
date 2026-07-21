@@ -65,10 +65,33 @@ netlify dev                     # serves the site at http://localhost:8888
 - Tabs: **My Team**, **Trade Targets**, **Evaluate a Trade**, **League Market**,
   **Trending Adds/Drops**.
 
+## Optional: the "Ask AI" chat tab
+
+The **Ask AI** tab is a chatbot that answers trade questions grounded in your
+live league data. It calls an open-source model (Llama 3.3 70B) through
+[Groq](https://groq.com)'s free tier, via the serverless function
+`netlify/functions/chat.js`. It's off until you add a key:
+
+1. Get a free API key at **[console.groq.com](https://console.groq.com)**.
+2. In **Netlify → Site configuration → Environment variables**, add:
+   - **`GROQ_API_KEY`** — your Groq key (required for the tab to work).
+   - **`CHAT_PASSWORD`** — *(recommended)* a shared password. When set, the tab
+     won't answer until the visitor enters it, so only you spend the free quota.
+   - **`GROQ_MODEL`** — *(optional)* override the model id (default
+     `llama-3.3-70b-versatile`).
+3. Redeploy (or trigger a deploy). Open the **Ask AI** tab, enter the password,
+   and ask away — e.g. *"Should I trade Bijan for CeeDee Lamb?"*
+
+The key lives only in Netlify's environment — it's never sent to the browser.
+Without `GROQ_API_KEY`, the tab shows a friendly "not configured yet" message
+and the rest of the app is unaffected.
+
 ## Notes
 
 - The proxy only forwards GET requests to `api.sleeper.app` and
   `api.fantasycalc.com` — it can't be used to reach anything else.
+- The chat function only talks to Groq and is rate-limited; with
+  `CHAT_PASSWORD` set it's gated to people who know the password.
 - Everything is read-only and public; no secrets or credentials are involved.
 - The original Python skill in `scripts/` still works unchanged for terminal use
   or as a Claude skill; the web app is an additional way to run the same logic.

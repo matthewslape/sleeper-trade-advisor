@@ -34,7 +34,10 @@ const State = {
   analysis: null, // last computed analysis
   analysisKey: null, // league id the analysis was built for
   proxyHosts: {}, // hostname -> true once a direct fetch has failed (use proxy)
+  chatHistory: [], // [{role, content}] for the Ask AI tab
 };
+
+const CHAT_ENDPOINT = "/.netlify/functions/chat";
 
 // --------------------------------------------------------------------------- //
 // Fetch layer (direct first, proxy fallback)
@@ -831,6 +834,161 @@ function renderWaivers(data) {
   </div>`;
 }
 
+// --------------------------------------------------------------------------- //
+// Ask AI (chat) — grounds a Groq-hosted open model in the live league data
+// --------------------------------------------------------------------------- //
+/** Compact, text snapshot of the league for the chatbot to reason over. */
+function buildChatContext(analysis, myTeam) {
+  const vs = analysis.value_settings;
+  const lg = analysis.league;
+  const fmtP = (p) =>
+    `${p.name} ${p.pos}-${p.team}${p.age ? ` age ${p.age}` : ""}${p.injury ? ` (${p.injury})` : ""} — ${p.value}`;
+
+  const lines = [];
+  lines.push(
+    `Format: ${lg.name} · ${vs.is_dynasty ? "dynasty" : "redraft"}, ${vs.num_qbs}QB, ${vs.num_teams}-team, ${vs.ppr}PPR`
+  );
+
+  lines.push("");
+  lines.push(`=== YOUR TEAM: ${myTeam.team_name} (${myTeam.owner_name}) — ${myTeam.record}, ${myTeam.fpts.toFixed(1)} pts ===`);
+  lines.push(`Total roster value: ${myTeam.total_value}`);
+  lines.push(`Needs: ${myTeam.needs.join(", ") || "none glaring"} | Surplus: ${myTeam.surplus.join(", ") || "none obvious"}`);
+  lines.push(
+    "Positional rank (1=best): " +
+      CORE_POS.map((pos) => `${pos} #${myTeam.pos_rank[pos]}/${analysis.teams.length}`).join(", ")
+  );
+  lines.push("Starters: " + myTeam.starters.map(fmtP).join("; "));
+  lines.push("Bench: " + (myTeam.bench.map(fmtP).join("; ") || "(none)"));
+
+  lines.push("");
+  lines.push("=== LEAGUE (highest roster value first) ===");
+  analysis.teams
+    .slice()
+    .sort((a, b) => b.total_value - a.total_value)
+    .forEach((t) => {
+      const you = t.roster_id === myTeam.roster_id ? " [YOU]" : "";
+      lines.push(
+        `${t.team_name} (${t.owner_name})${you} — ${t.record}, val ${t.total_value}, needs:[${t.needs.join(",") || "-"}] surplus:[${t.surplus.join(",") || "-"}]`
+      );
+    });
+
+  const targets = findTargets(analysis, myTeam);
+  if (targets.length) {
+    lines.push("");
+    lines.push("=== SUGGESTED TARGETS (value-balanced leads) ===");
+    targets.forEach((s) => {
+      lines.push(
+        `With ${s.partner} (${s.partner_owner}): GET ${fmtP(s.you_get)} [upgrades your ${s.fills_your_need}] / GIVE ${fmtP(s.you_give)} — value gap ${s.value_gap >= 0 ? "+" : ""}${s.value_gap}`
+      );
+    });
+  }
+  return lines.join("\n");
+}
+
+function chatBubble(role, text) {
+  return `<div class="bubble ${role === "assistant" ? "bot" : "you"}">${esc(text).replace(/\n/g, "<br>")}</div>`;
+}
+
+function renderChat() {
+  const pw = (() => {
+    try {
+      return localStorage.getItem("sta_chat_pw") || "";
+    } catch (_e) {
+      return "";
+    }
+  })();
+  const bubbles = State.chatHistory.length
+    ? State.chatHistory.map((m) => chatBubble(m.role, m.content)).join("")
+    : `<div class="bubble bot">Ask me anything about your team or a trade — e.g. <i>"Should I trade Bijan for CeeDee Lamb?"</i>, <i>"Who's my best buy-low?"</i>, or <i>"What does my roster actually need?"</i> I read your live league data before answering.</div>`;
+
+  return `<div class="card chat-card">
+    <div class="chat-pw">
+      <label>Access password</label>
+      <input id="chat-pw" type="password" autocomplete="off" placeholder="set in Netlify (CHAT_PASSWORD)" value="${esc(pw)}" />
+    </div>
+    <div id="chat-log" class="chat-log">${bubbles}</div>
+    <div id="chat-status" class="chat-status"></div>
+    <div class="chat-inputrow">
+      <textarea id="chat-input" rows="2" placeholder="Ask about a trade… (Enter to send, Shift+Enter for a new line)"></textarea>
+      <button id="chat-send" class="primary" type="button">Send</button>
+    </div>
+  </div>`;
+}
+
+function setupChat(cfg) {
+  const log = document.getElementById("chat-log");
+  const input = document.getElementById("chat-input");
+  const sendBtn = document.getElementById("chat-send");
+  const pwEl = document.getElementById("chat-pw");
+  const statusEl = document.getElementById("chat-status");
+
+  const scroll = () => (log.scrollTop = log.scrollHeight);
+  const addBubble = (role, text) => {
+    if (!State.chatHistory.length) log.innerHTML = ""; // clear the intro on first send
+    State.chatHistory.push({ role, content: text });
+    log.insertAdjacentHTML("beforeend", chatBubble(role, text));
+    scroll();
+  };
+
+  pwEl.addEventListener("change", () => {
+    try {
+      localStorage.setItem("sta_chat_pw", pwEl.value.trim());
+    } catch (_e) {
+      /* ignore */
+    }
+  });
+
+  let busy = false;
+  async function send() {
+    if (busy) return;
+    const text = input.value.trim();
+    if (!text) return;
+    busy = true;
+    sendBtn.disabled = true;
+    input.value = "";
+    addBubble("user", text);
+    statusEl.innerHTML = `<span class="spinner"></span> Reading your league and thinking…`;
+
+    try {
+      const { analysis, myTeam } = await getContext(readConfig());
+      const context = buildChatContext(analysis, myTeam);
+      const resp = await fetch(CHAT_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          messages: State.chatHistory,
+          context,
+          password: pwEl.value.trim(),
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        statusEl.innerHTML = `<span class="chat-err">${esc(data.error || `Request failed (HTTP ${resp.status}).`)}</span>`;
+      } else {
+        addBubble("assistant", data.reply || "(no response)");
+        statusEl.innerHTML = "";
+      }
+    } catch (e) {
+      statusEl.innerHTML = `<span class="chat-err">${esc(
+        e instanceof AdvisorError ? e.message : "Couldn't reach the chat backend. If running locally, use `netlify dev` so the function exists."
+      )}</span>`;
+    } finally {
+      busy = false;
+      sendBtn.disabled = false;
+      input.focus();
+    }
+  }
+
+  sendBtn.addEventListener("click", send);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  });
+  input.focus();
+}
+
 function renderEvaluation(ev, missing) {
   const pct = ev.value_delta_pct;
   const cls = pct >= 5 ? "win" : pct <= -5 ? "lose" : "even";
@@ -931,6 +1089,15 @@ async function run(tab) {
     return;
   }
   saveConfig(cfg);
+
+  // The chat tab is interactive — render it immediately and load league data
+  // lazily on the first question, rather than blocking on analysis up front.
+  if (tab === "chat") {
+    setStatus("");
+    setResult(renderChat());
+    setupChat(cfg);
+    return;
+  }
 
   setStatus(`<span class="spinner"></span> Loading… (first run fetches the full player list — a few seconds)`);
   setResult("");
