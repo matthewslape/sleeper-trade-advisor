@@ -1,9 +1,31 @@
-# Sleeper Trade Advisor — a Claude skill
+# Sleeper Trade Advisor
 
-A [Claude](https://claude.com/claude-code) skill that gives **fantasy football
-trade recommendations, roster analysis, and waiver/lineup insights** for your
-own [Sleeper](https://sleeper.com) league — grounded in real NFL data and
-objective, market-based trade values.
+**Fantasy football trade recommendations, roster analysis, and waiver/lineup
+insights** for your own [Sleeper](https://sleeper.com) league — grounded in real
+NFL data and objective, market-based trade values.
+
+It comes in two forms that share the same logic:
+
+- **A web app** (`web/`) you can deploy to Netlify and open in any browser —
+  see **[DEPLOY.md](DEPLOY.md)**. All fetching and analysis run in your browser,
+  so it works from any device with normal internet.
+- **A [Claude](https://claude.com/claude-code) skill** (`SKILL.md`, `scripts/`)
+  you talk to conversationally in Claude Code (details below).
+
+## The web app
+
+Deploy `web/` to Netlify (2 minutes, no build step, no keys — full steps in
+[DEPLOY.md](DEPLOY.md)) and you get a page with tabs for **My Team**, **Trade
+Targets**, **Evaluate a Trade**, **League Market**, and **Trending Adds/Drops**.
+It's pre-configured for this league and editable in the page. A small bundled
+serverless proxy (`netlify/functions/proxy.js`) covers networks that block
+direct browser API calls.
+
+## The Claude skill
+
+A Claude skill that gives trade recommendations, roster analysis, and
+waiver/lineup insights, grounded in real NFL data and objective, market-based
+trade values.
 
 Ask Claude things like:
 

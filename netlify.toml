@@ -1,0 +1,19 @@
+# Netlify configuration for the Sleeper Trade Advisor web app.
+#
+# The site is fully static (no build step); `web/` is served as-is and the
+# serverless proxy in `netlify/functions/` is bundled automatically.
+
+[build]
+  publish = "web"
+  functions = "netlify/functions"
+  command = ""
+
+[functions]
+  node_bundler = "esbuild"
+
+# Friendly alias for the proxy (the app also calls /.netlify/functions/proxy
+# directly, so this is optional but nice to have).
+[[redirects]]
+  from = "/api/proxy"
+  to = "/.netlify/functions/proxy"
+  status = 200

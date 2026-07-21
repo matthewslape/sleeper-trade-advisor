@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Sleeper Trade Advisor</title>
+    <meta
+      name="description"
+      content="Fantasy football trade advice, roster analysis, and waiver insights for your Sleeper league."
+    />
+    <link rel="stylesheet" href="./styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8F%88%3C/text%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <header class="site-header">
+      <div class="wrap">
+        <div class="brand">
+          <span class="brand-emoji">🏈</span>
+          <div>
+            <h1>Sleeper Trade Advisor</h1>
+            <p class="tagline">Live roster analysis &amp; objective trade values for your league</p>
+          </div>
+        </div>
+      </div>
+    </header>
+
+    <main class="wrap">
+      <section class="config">
+        <div class="field">
+          <label for="username">Sleeper username</label>
+          <input id="username" type="text" autocomplete="off" spellcheck="false" placeholder="your_username" />
+        </div>
+        <div class="field">
+          <label for="league">League ID <span class="opt">(optional)</span></label>
+          <input id="league" type="text" autocomplete="off" spellcheck="false" placeholder="auto-detected if blank" />
+        </div>
+      </section>
+
+      <nav class="tabs">
+        <button class="tab active" data-tab="team">My Team</button>
+        <button class="tab" data-tab="targets">Trade Targets</button>
+        <button class="tab" data-tab="evaluate">Evaluate a Trade</button>
+        <button class="tab" data-tab="league">League Market</button>
+        <button class="tab" data-tab="trending-add">Trending Adds</button>
+        <button class="tab" data-tab="trending-drop">Trending Drops</button>
+      </nav>
+
+      <section id="evaluate-inputs" class="evaluate-inputs" style="display: none">
+        <div class="field grow">
+          <label for="give">You give <span class="opt">(comma-separated)</span></label>
+          <input id="give" type="text" autocomplete="off" placeholder="Bijan Robinson, Chris Olave" />
+        </div>
+        <div class="field grow">
+          <label for="get">You get <span class="opt">(comma-separated)</span></label>
+          <input id="get" type="text" autocomplete="off" placeholder="CeeDee Lamb" />
+        </div>
+        <button id="eval-run" class="primary">Evaluate</button>
+      </section>
+
+      <div id="status" class="status"></div>
+      <div id="result" class="result"></div>
+
+      <footer class="site-footer">
+        <p>
+          Data from the free public
+          <a href="https://docs.sleeper.com" target="_blank" rel="noopener">Sleeper API</a>
+          and
+          <a href="https://fantasycalc.com" target="_blank" rel="noopener">FantasyCalc</a>.
+          Trade values are a market snapshot — treat sub-5% gaps as coin flips and
+          weigh roster fit, not just the number.
+        </p>
+      </footer>
+    </main>
+
+    <script src="./app.js"></script>
+  </body>
+</html>
