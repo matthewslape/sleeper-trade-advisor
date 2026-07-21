@@ -9,7 +9,6 @@
 // Required Netlify environment variable:
 //   GROQ_API_KEY   — free key from https://console.groq.com
 // Optional:
-//   CHAT_PASSWORD  — if set, callers must send the matching password
 //   GROQ_MODEL     — override the model id (default below)
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
@@ -87,11 +86,6 @@ exports.handler = async (event) => {
     body = JSON.parse(event.body || "{}");
   } catch (_e) {
     return json(400, { error: "Invalid request body." });
-  }
-
-  const required = process.env.CHAT_PASSWORD;
-  if (required && body.password !== required) {
-    return json(401, { error: "Incorrect access password." });
   }
 
   const history = (Array.isArray(body.messages) ? body.messages : [])

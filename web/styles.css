@@ -405,10 +405,6 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-wei
 
 /* ------------------------------------------------------------ Ask AI chat */
 .chat-card { display: flex; flex-direction: column; gap: 12px; }
-.chat-pw { display: flex; flex-direction: column; gap: 5px; max-width: 320px; }
-.chat-pw label { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); }
-.chat-pw input { background: var(--surface-2); border: 1px solid var(--border-strong); color: var(--ink); border-radius: var(--radius-sm); padding: 8px 11px; font: inherit; font-size: 13.5px; outline: none; }
-.chat-pw input:focus { border-color: var(--link); box-shadow: 0 0 0 3px var(--focus); }
 .chat-log {
   display: flex;
   flex-direction: column;

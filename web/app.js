@@ -890,22 +890,11 @@ function chatBubble(role, text) {
 }
 
 function renderChat() {
-  const pw = (() => {
-    try {
-      return localStorage.getItem("sta_chat_pw") || "";
-    } catch (_e) {
-      return "";
-    }
-  })();
   const bubbles = State.chatHistory.length
     ? State.chatHistory.map((m) => chatBubble(m.role, m.content)).join("")
     : `<div class="bubble bot">Ask me anything about your team or a trade — e.g. <i>"Should I trade Bijan for CeeDee Lamb?"</i>, <i>"Who's my best buy-low?"</i>, or <i>"What does my roster actually need?"</i> I read your live league data before answering.</div>`;
 
   return `<div class="card chat-card">
-    <div class="chat-pw">
-      <label>Access password</label>
-      <input id="chat-pw" type="password" autocomplete="off" placeholder="set in Netlify (CHAT_PASSWORD)" value="${esc(pw)}" />
-    </div>
     <div id="chat-log" class="chat-log">${bubbles}</div>
     <div id="chat-status" class="chat-status"></div>
     <div class="chat-inputrow">
@@ -919,7 +908,6 @@ function setupChat(cfg) {
   const log = document.getElementById("chat-log");
   const input = document.getElementById("chat-input");
   const sendBtn = document.getElementById("chat-send");
-  const pwEl = document.getElementById("chat-pw");
   const statusEl = document.getElementById("chat-status");
 
   const scroll = () => (log.scrollTop = log.scrollHeight);
@@ -929,14 +917,6 @@ function setupChat(cfg) {
     log.insertAdjacentHTML("beforeend", chatBubble(role, text));
     scroll();
   };
-
-  pwEl.addEventListener("change", () => {
-    try {
-      localStorage.setItem("sta_chat_pw", pwEl.value.trim());
-    } catch (_e) {
-      /* ignore */
-    }
-  });
 
   let busy = false;
   async function send() {
@@ -955,11 +935,7 @@ function setupChat(cfg) {
       const resp = await fetch(CHAT_ENDPOINT, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          messages: State.chatHistory,
-          context,
-          password: pwEl.value.trim(),
-        }),
+        body: JSON.stringify({ messages: State.chatHistory, context }),
       });
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) {
