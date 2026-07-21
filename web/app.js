@@ -1,0 +1,779 @@
+/* Sleeper Trade Advisor — browser app.
+ *
+ * A faithful client-side port of the Python skill (sleeper.py + trade_advisor.py).
+ * All fetching and analysis run in the user's browser, so it needs no server of
+ * its own beyond an optional proxy fallback (netlify/functions/proxy.js) for
+ * networks where the two public APIs don't allow direct cross-origin calls.
+ */
+
+// --------------------------------------------------------------------------- //
+// Config + constants
+// --------------------------------------------------------------------------- //
+const DEFAULT_CONFIG = {
+  username: "slapebeboomin",
+  league_id: "1311998246557609984",
+  season: "",
+};
+
+const SLEEPER_BASE = "https://api.sleeper.app/v1";
+const FANTASYCALC_BASE = "https://api.fantasycalc.com";
+const PROXY_PATH = "/.netlify/functions/proxy";
+
+const CORE_POS = ["QB", "RB", "WR", "TE"];
+const FLEX_SLOTS = {
+  FLEX: ["RB", "WR", "TE"],
+  WRRB_FLEX: ["RB", "WR"],
+  REC_FLEX: ["WR", "TE"],
+  SUPER_FLEX: ["QB", "RB", "WR", "TE"],
+};
+
+// Session-scoped caches so switching tabs doesn't refetch the 5MB player index.
+const State = {
+  players: null,
+  values: {}, // keyed by value-settings signature
+  analysis: null, // last computed analysis
+  analysisKey: null, // league id the analysis was built for
+  proxyHosts: {}, // hostname -> true once a direct fetch has failed (use proxy)
+};
+
+// --------------------------------------------------------------------------- //
+// Fetch layer (direct first, proxy fallback)
+// --------------------------------------------------------------------------- //
+async function apiGetJson(url) {
+  const host = new URL(url).hostname;
+
+  if (!State.proxyHosts[host]) {
+    try {
+      const r = await fetch(url, { headers: { Accept: "application/json" } });
+      return await handleResponse(r);
+    } catch (_e) {
+      // A thrown fetch is almost always a CORS/network block, not a real HTTP
+      // status. Remember it and route this host through the proxy from now on.
+      State.proxyHosts[host] = true;
+    }
+  }
+
+  const proxied = `${PROXY_PATH}?url=${encodeURIComponent(url)}`;
+  let r;
+  try {
+    r = await fetch(proxied, { headers: { Accept: "application/json" } });
+  } catch (e) {
+    throw new AdvisorError(
+      "Couldn't reach the data source, and the proxy fallback is unavailable. " +
+        "If you're running this locally, use `netlify dev` (or deploy to Netlify) " +
+        "so the proxy function exists."
+    );
+  }
+  return await handleResponse(r);
+}
+
+async function handleResponse(r) {
+  if (r.status === 404) return null; // treat "not found" like the Python client
+  if (!r.ok) {
+    throw new AdvisorError(`Request failed (HTTP ${r.status}).`);
+  }
+  const text = await r.text();
+  if (!text) return null;
+  try {
+    return JSON.parse(text);
+  } catch (_e) {
+    throw new AdvisorError("Data source returned a non-JSON response.");
+  }
+}
+
+class AdvisorError extends Error {}
+
+// --------------------------------------------------------------------------- //
+// Sleeper + FantasyCalc endpoints
+// --------------------------------------------------------------------------- //
+const getState = () => apiGetJson(`${SLEEPER_BASE}/state/nfl`);
+const getUser = (u) => apiGetJson(`${SLEEPER_BASE}/user/${encodeURIComponent(u)}`);
+const getUserLeagues = (uid, season) =>
+  apiGetJson(`${SLEEPER_BASE}/user/${uid}/leagues/nfl/${season}`);
+const getLeague = (id) => apiGetJson(`${SLEEPER_BASE}/league/${id}`);
+const getRosters = (id) => apiGetJson(`${SLEEPER_BASE}/league/${id}/rosters`);
+const getLeagueUsers = (id) => apiGetJson(`${SLEEPER_BASE}/league/${id}/users`);
+const getTrending = (kind, hours = 24, limit = 25) =>
+  apiGetJson(
+    `${SLEEPER_BASE}/players/nfl/trending/${kind}?lookback_hours=${hours}&limit=${limit}`
+  );
+
+async function loadPlayers() {
+  if (State.players) return State.players;
+  const data = await apiGetJson(`${SLEEPER_BASE}/players/nfl`);
+  if (!data) throw new AdvisorError("Could not load the Sleeper player index.");
+  State.players = data;
+  return data;
+}
+
+async function loadValues(numQbs, numTeams, ppr, isDynasty) {
+  const key = `${numQbs}q_${numTeams}t_${ppr}ppr_${isDynasty ? "dyn" : "red"}`;
+  if (State.values[key]) return State.values[key];
+  const q = new URLSearchParams({
+    isDynasty: String(Boolean(isDynasty)),
+    numQbs: String(numQbs),
+    numTeams: String(numTeams),
+    ppr: String(ppr),
+  });
+  const data = (await apiGetJson(`${FANTASYCALC_BASE}/values/current?${q}`)) || [];
+  State.values[key] = data;
+  return data;
+}
+
+// --------------------------------------------------------------------------- //
+// Value matching
+// --------------------------------------------------------------------------- //
+function normName(name) {
+  if (!name) return "";
+  let n = String(name).toLowerCase();
+  n = n.replace(/[.'`]/g, "");
+  n = n.replace(/\s+(jr|sr|ii|iii|iv|v)\b/g, "");
+  n = n.replace(/[^a-z0-9 ]/g, " ");
+  return n.replace(/\s+/g, " ").trim();
+}
+
+function leagueValueSettings(league) {
+  const positions = league.roster_positions || [];
+  let numQbs =
+    positions.filter((p) => p === "QB").length +
+    positions.filter((p) => p === "SUPER_FLEX").length;
+  numQbs = Math.max(1, numQbs);
+  const numTeams = league.total_rosters || 12;
+  const ppr = (league.scoring_settings && league.scoring_settings.rec) || 0;
+  const isDynasty = (league.settings && league.settings.type) === 2;
+  return { num_qbs: numQbs, num_teams: numTeams, ppr, is_dynasty: isDynasty };
+}
+
+async function buildValueIndex(league) {
+  const s = leagueValueSettings(league);
+  const values = (await loadValues(s.num_qbs, s.num_teams, s.ppr, s.is_dynasty)) || [];
+  const bySleeperId = {};
+  const byNamePos = {};
+  for (const row of values) {
+    const pl = row.player || {};
+    const val = row.value || 0;
+    if (pl.sleeperId != null) bySleeperId[String(pl.sleeperId)] = val;
+    const key = `${normName(pl.name)}|${(pl.position || "").toUpperCase()}`;
+    byNamePos[key] = val;
+  }
+  const valueOf = (playerId, players) => {
+    const pid = String(playerId);
+    if (pid in bySleeperId) return bySleeperId[pid];
+    const info = players[pid] || {};
+    const key = `${normName(info.full_name)}|${(info.position || "").toUpperCase()}`;
+    return byNamePos[key] || 0;
+  };
+  return { valueOf, byNamePos, settings: s };
+}
+
+// --------------------------------------------------------------------------- //
+// Roster enrichment
+// --------------------------------------------------------------------------- //
+function playerBrief(pid, players) {
+  const info = players[String(pid)] || {};
+  const name = info.full_name || info.last_name || String(pid);
+  return {
+    player_id: String(pid),
+    name,
+    pos: (info.position || "?").toUpperCase(),
+    team: info.team || "FA",
+    age: info.age != null ? info.age : null,
+    injury: info.injury_status || null,
+  };
+}
+
+function enrichRoster(roster, players, valueOf) {
+  const starters = (roster.starters || [])
+    .map(String)
+    .filter((p) => p && p !== "0");
+  const allPlayers = (roster.players || []).map(String).filter((p) => p && p !== "0");
+  const reserve = new Set((roster.reserve || []).map(String).filter(Boolean));
+  const taxi = new Set((roster.taxi || []).map(String).filter(Boolean));
+  const starterSet = new Set(starters);
+  const bench = allPlayers.filter(
+    (p) => !starterSet.has(p) && !reserve.has(p) && !taxi.has(p)
+  );
+
+  const decorate = (pid) => {
+    const b = playerBrief(pid, players);
+    b.value = valueOf(pid, players);
+    return b;
+  };
+
+  const enriched = {
+    roster_id: roster.roster_id,
+    owner_id: roster.owner_id,
+    starters: starters.map(decorate).sort((a, b) => b.value - a.value),
+    bench: bench.map(decorate).sort((a, b) => b.value - a.value),
+    settings: roster.settings || {},
+  };
+  enriched.total_value = [...enriched.starters, ...enriched.bench].reduce(
+    (acc, p) => acc + p.value,
+    0
+  );
+  return enriched;
+}
+
+function positionalValue(enriched) {
+  const buckets = {};
+  for (const p of CORE_POS) buckets[p] = [];
+  for (const p of [...enriched.starters, ...enriched.bench]) {
+    if (buckets[p.pos]) buckets[p.pos].push(p.value);
+  }
+  const out = {};
+  for (const pos of CORE_POS) out[pos] = buckets[pos].slice().sort((a, b) => b - a);
+  return out;
+}
+
+function startingSlots(league) {
+  const positions = league.roster_positions || [];
+  const dedicated = {};
+  const flexFor = {};
+  for (const p of CORE_POS) {
+    dedicated[p] = 0;
+    flexFor[p] = 0;
+  }
+  for (const slot of positions) {
+    if (slot in dedicated) {
+      dedicated[slot] += 1;
+    } else if (FLEX_SLOTS[slot]) {
+      for (const p of FLEX_SLOTS[slot]) if (p in flexFor) flexFor[p] += 1;
+    }
+  }
+  return { dedicated, flexFor };
+}
+
+// --------------------------------------------------------------------------- //
+// Analysis
+// --------------------------------------------------------------------------- //
+async function analyzeLeague(league) {
+  const players = await loadPlayers();
+  const { valueOf, byNamePos, settings } = await buildValueIndex(league);
+  const rosters = (await getRosters(league.league_id)) || [];
+  const usersArr = (await getLeagueUsers(league.league_id)) || [];
+  const users = {};
+  for (const u of usersArr) users[u.user_id] = u;
+
+  const teams = [];
+  for (const r of rosters) {
+    const e = enrichRoster(r, players, valueOf);
+    const u = users[r.owner_id] || {};
+    e.team_name =
+      (u.metadata && u.metadata.team_name) || u.display_name || `Roster ${e.roster_id}`;
+    e.owner_name = u.display_name || "?";
+    e.pos_values = positionalValue(e);
+    const st = r.settings || {};
+    e.record =
+      `${st.wins || 0}-${st.losses || 0}` + (st.ties ? `-${st.ties}` : "");
+    e.fpts = (st.fpts || 0) + (st.fpts_decimal || 0) / 100.0;
+    teams.push(e);
+  }
+
+  const { dedicated, flexFor } = startingSlots(league);
+
+  for (const pos of CORE_POS) {
+    let nStart = dedicated[pos] + flexFor[pos];
+    nStart = Math.max(1, nStart);
+    const ranked = teams
+      .slice()
+      .sort(
+        (a, b) =>
+          sumTop(b.pos_values[pos], nStart) - sumTop(a.pos_values[pos], nStart)
+      );
+    ranked.forEach((t, i) => {
+      t.pos_rank = t.pos_rank || {};
+      t.pos_starter_value = t.pos_starter_value || {};
+      t.pos_rank[pos] = i + 1;
+      t.pos_starter_value[pos] = sumTop(t.pos_values[pos], nStart);
+    });
+  }
+
+  const nTeams = teams.length;
+  for (const t of teams) {
+    const needs = [];
+    const surplus = [];
+    for (const pos of CORE_POS) {
+      const rank = t.pos_rank[pos];
+      const nStart = Math.max(1, dedicated[pos] + flexFor[pos]);
+      const depth = t.pos_values[pos].filter((v) => v > 0).length;
+      if (rank > nTeams * 0.6) {
+        needs.push(pos);
+      } else if (rank <= nTeams * 0.34 && depth > nStart) {
+        surplus.push(pos);
+      }
+    }
+    t.needs = needs;
+    t.surplus = surplus;
+  }
+
+  return {
+    league,
+    value_settings: settings,
+    teams,
+    dedicated,
+    flexFor,
+    players,
+    valueOf,
+    byNamePos,
+  };
+}
+
+function sumTop(arr, n) {
+  return arr.slice(0, n).reduce((acc, v) => acc + v, 0);
+}
+
+function findMyTeam(analysis, user) {
+  const t = analysis.teams.find((t) => t.owner_id === user.user_id);
+  if (!t) {
+    throw new AdvisorError(
+      "Could not find your team in this league (owner_id mismatch). " +
+        "Check that the username matches an owner in this league."
+    );
+  }
+  return t;
+}
+
+// --------------------------------------------------------------------------- //
+// Trade evaluation
+// --------------------------------------------------------------------------- //
+function resolvePlayersByName(names, analysis) {
+  const players = analysis.players;
+  const nameIndex = {};
+  for (const [pid, info] of Object.entries(players)) {
+    const pos = (info.position || "").toUpperCase();
+    if (CORE_POS.includes(pos) || pos === "K" || pos === "DEF") {
+      const key = normName(info.full_name);
+      if (!(key in nameIndex)) nameIndex[key] = pid;
+    }
+  }
+  const resolved = [];
+  const missing = [];
+  for (const raw of names) {
+    const pid = nameIndex[normName(raw)];
+    if (pid) {
+      const b = playerBrief(pid, players);
+      b.value = analysis.valueOf(pid, players);
+      resolved.push(b);
+    } else {
+      missing.push(raw);
+    }
+  }
+  return { resolved, missing };
+}
+
+function verdict(pct) {
+  if (pct >= 15) return "Clear win for you";
+  if (pct >= 5) return "Slightly favors you";
+  if (pct > -5) return "Roughly even";
+  if (pct > -15) return "Slightly favors them";
+  return "Overpay — favors them";
+}
+
+function evaluateTrade(give, get, myTeam) {
+  const giveV = give.reduce((a, p) => a + p.value, 0);
+  const getV = get.reduce((a, p) => a + p.value, 0);
+  const delta = getV - giveV;
+  const total = giveV + getV || 1;
+  const pct = (100.0 * delta) / (total / 2);
+  const impact = {};
+  for (const p of get) impact[p.pos] = (impact[p.pos] || 0) + 1;
+  for (const p of give) impact[p.pos] = (impact[p.pos] || 0) - 1;
+  return {
+    give,
+    get,
+    give_value: giveV,
+    get_value: getV,
+    value_delta: delta,
+    value_delta_pct: Math.round(pct * 10) / 10,
+    verdict: verdict(pct),
+    net_positions: impact,
+    your_needs: myTeam.needs,
+    your_surplus: myTeam.surplus,
+  };
+}
+
+// --------------------------------------------------------------------------- //
+// Trade-target finder
+// --------------------------------------------------------------------------- //
+function bestSurplusPlayer(team, pos, analysis, nearValue) {
+  const keep = Math.max(1, analysis.dedicated[pos] + analysis.flexFor[pos]);
+  const pool = [...team.starters, ...team.bench]
+    .filter((p) => p.pos === pos && p.value > 0)
+    .sort((a, b) => b.value - a.value);
+  let movable = pool.slice(keep);
+  if (!movable.length) return null;
+  if (nearValue != null) {
+    movable = movable
+      .slice()
+      .sort((a, b) => Math.abs(a.value - nearValue) - Math.abs(b.value - nearValue));
+  }
+  return movable[0];
+}
+
+function findTargets(analysis, myTeam, maxPartners = 4) {
+  const suggestions = [];
+  for (const opp of analysis.teams) {
+    if (opp.roster_id === myTeam.roster_id) continue;
+    const myNeedsTheyHave = myTeam.needs.filter((p) => opp.surplus.includes(p));
+    const theirNeedsIHave = opp.needs.filter((p) => myTeam.surplus.includes(p));
+    if (!myNeedsTheyHave.length || !theirNeedsIHave.length) continue;
+    for (const needPos of myNeedsTheyHave) {
+      const target = bestSurplusPlayer(opp, needPos, analysis);
+      if (!target) continue;
+      for (const givePos of theirNeedsIHave) {
+        const offer = bestSurplusPlayer(myTeam, givePos, analysis, target.value);
+        if (!offer) continue;
+        suggestions.push({
+          partner: opp.team_name,
+          partner_owner: opp.owner_name,
+          partner_record: opp.record,
+          you_get: target,
+          you_give: offer,
+          fills_your_need: needPos,
+          fills_their_need: givePos,
+          value_gap: target.value - offer.value,
+        });
+      }
+    }
+  }
+  suggestions.sort((a, b) => Math.abs(a.value_gap) - Math.abs(b.value_gap));
+  return suggestions.slice(0, maxPartners * 2);
+}
+
+// --------------------------------------------------------------------------- //
+// League resolution + top-level orchestration
+// --------------------------------------------------------------------------- //
+async function resolveLeague(cfg) {
+  const user = await getUser(cfg.username);
+  if (!user) {
+    throw new AdvisorError(
+      `No Sleeper user named "${cfg.username}". Check the spelling and case.`
+    );
+  }
+  if (cfg.league_id) {
+    const league = await getLeague(cfg.league_id);
+    if (!league) throw new AdvisorError(`League ${cfg.league_id} not found.`);
+    return { league, user };
+  }
+  const season = cfg.season || ((await getState()) || {}).season;
+  const leagues = (await getUserLeagues(user.user_id, season)) || [];
+  if (!leagues.length) {
+    throw new AdvisorError(`"${cfg.username}" has no NFL leagues for ${season}.`);
+  }
+  if (leagues.length === 1) return { league: leagues[0], user };
+  const listing = leagues
+    .map((lg) => `${lg.name} (league_id: ${lg.league_id})`)
+    .join("; ");
+  throw new AdvisorError(
+    `"${cfg.username}" is in ${leagues.length} leagues for ${season}. ` +
+      `Set a League ID above. Options: ${listing}`
+  );
+}
+
+/** Build (or reuse) the analysis + my team for the current config. */
+async function getContext(cfg) {
+  const { league, user } = await resolveLeague(cfg);
+  if (State.analysis && State.analysisKey === league.league_id) {
+    return { analysis: State.analysis, myTeam: findMyTeam(State.analysis, user), user };
+  }
+  const analysis = await analyzeLeague(league);
+  State.analysis = analysis;
+  State.analysisKey = league.league_id;
+  const myTeam = findMyTeam(analysis, user);
+  return { analysis, myTeam, user };
+}
+
+// --------------------------------------------------------------------------- //
+// Rendering
+// --------------------------------------------------------------------------- //
+function esc(s) {
+  return String(s == null ? "" : s).replace(
+    /[&<>"']/g,
+    (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])
+  );
+}
+
+function posBadge(pos) {
+  return `<span class="pos pos-${esc(pos)}">${esc(pos)}</span>`;
+}
+
+function playerRow(p) {
+  const inj = p.injury ? `<span class="inj">${esc(p.injury)}</span>` : "";
+  const age = p.age ? `<span class="meta">age ${esc(p.age)}</span>` : "";
+  return `<div class="player">
+    <div class="player-id">${posBadge(p.pos)}
+      <span class="pname">${esc(p.name)}</span>
+      <span class="meta">${esc(p.team)}</span>${age}${inj}
+    </div>
+    <div class="pval">${p.value}</div>
+  </div>`;
+}
+
+function chips(list, cls, emptyLabel) {
+  if (!list || !list.length) return `<span class="chip muted">${esc(emptyLabel)}</span>`;
+  return list.map((x) => `<span class="chip ${cls}">${esc(x)}</span>`).join(" ");
+}
+
+function settingsLine(vs, league) {
+  return `${esc(league.name)} &middot; ${vs.is_dynasty ? "dynasty" : "redraft"},
+    ${vs.num_qbs}QB, ${vs.num_teams}-team, ${vs.ppr}PPR`;
+}
+
+function renderTeam(analysis, t) {
+  const vs = analysis.value_settings;
+  const posRanks = CORE_POS.map(
+    (pos) =>
+      `<div class="rank-cell">${posBadge(pos)}
+        <div><b>#${t.pos_rank[pos]}</b> <span class="meta">of ${analysis.teams.length}</span></div>
+        <div class="meta">val ${t.pos_starter_value[pos]}</div>
+      </div>`
+  ).join("");
+
+  return `
+    <div class="card head-card">
+      <div class="head-top">
+        <div>
+          <h2>${esc(t.team_name)}</h2>
+          <div class="meta">${esc(t.owner_name)} &middot; ${esc(t.record)} &middot; ${t.fpts.toFixed(1)} pts</div>
+        </div>
+        <div class="totval"><div class="totval-num">${t.total_value}</div><div class="meta">roster value</div></div>
+      </div>
+      <div class="meta subtle">${settingsLine(vs, analysis.league)}</div>
+      <div class="needsurp">
+        <div><span class="label">Needs</span> ${chips(t.needs, "need", "none glaring")}</div>
+        <div><span class="label">Surplus</span> ${chips(t.surplus, "surplus", "none obvious")}</div>
+      </div>
+      <div class="rank-row">${posRanks}</div>
+    </div>
+    <div class="card">
+      <h3>Starters</h3>
+      ${t.starters.map(playerRow).join("") || '<div class="meta">(none)</div>'}
+    </div>
+    <div class="card">
+      <h3>Bench</h3>
+      ${t.bench.map(playerRow).join("") || '<div class="meta">(none)</div>'}
+    </div>`;
+}
+
+function renderLeague(analysis) {
+  const teams = analysis.teams.slice().sort((a, b) => b.fpts - a.fpts);
+  const rows = teams
+    .map(
+      (t) => `<tr>
+        <td><b>${esc(t.team_name)}</b><div class="meta">${esc(t.owner_name)}</div></td>
+        <td>${esc(t.record)}</td>
+        <td class="num">${t.total_value}</td>
+        <td>${chips(t.needs, "need", "—")}</td>
+        <td>${chips(t.surplus, "surplus", "—")}</td>
+      </tr>`
+    )
+    .join("");
+  return `<div class="card">
+    <h3>League trade market</h3>
+    <div class="meta subtle">${settingsLine(analysis.value_settings, analysis.league)}</div>
+    <div class="table-wrap"><table>
+      <thead><tr><th>Team</th><th>Record</th><th class="num">Value</th><th>Needs</th><th>Surplus</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table></div>
+  </div>`;
+}
+
+function renderTargets(suggestions) {
+  if (!suggestions.length) {
+    return `<div class="card"><p class="meta">No clean complementary trade partners
+      found from surplus/need matching. Try the <b>League</b> tab to eyeball value
+      gaps, or evaluate a specific trade manually.</p></div>`;
+  }
+  return suggestions
+    .map((s) => {
+      const gap = s.value_gap;
+      const tilt =
+        Math.abs(gap) < 400 ? "even" : gap > 0 ? "you win" : "they win";
+      const tiltCls = Math.abs(gap) < 400 ? "even" : gap > 0 ? "win" : "lose";
+      return `<div class="card target">
+        <div class="target-head">With <b>${esc(s.partner)}</b>
+          <span class="meta">(${esc(s.partner_owner)}, ${esc(s.partner_record)})</span></div>
+        <div class="swap">
+          <div class="swap-side get">
+            <div class="swap-label">You get &middot; fills your ${esc(s.fills_your_need)}</div>
+            ${playerRow(s.you_get)}
+          </div>
+          <div class="swap-side give">
+            <div class="swap-label">You give &middot; fills their ${esc(s.fills_their_need)}</div>
+            ${playerRow(s.you_give)}
+          </div>
+        </div>
+        <div class="gap ${tiltCls}">Value gap: ${gap >= 0 ? "+" : ""}${gap} &middot; ${tilt}</div>
+      </div>`;
+    })
+    .join("");
+}
+
+function renderEvaluation(ev, missing) {
+  const pct = ev.value_delta_pct;
+  const cls = pct >= 5 ? "win" : pct <= -5 ? "lose" : "even";
+  const warn = missing.length
+    ? `<div class="warn">Couldn't match: ${esc(missing.join(", "))}
+        (check spelling; excluded from totals).</div>`
+    : "";
+  const posChanges = Object.entries(ev.net_positions)
+    .map(([k, v]) => `${esc(k)} ${v >= 0 ? "+" : ""}${v}`)
+    .join(", ");
+  return `${warn}
+    <div class="card verdict ${cls}">
+      <div class="verdict-main">${esc(ev.verdict)}</div>
+      <div class="verdict-sub">Value delta ${ev.value_delta >= 0 ? "+" : ""}${ev.value_delta}
+        (${pct >= 0 ? "+" : ""}${pct}%)</div>
+    </div>
+    <div class="eval-grid">
+      <div class="card">
+        <h3>You give <span class="meta">(${ev.give_value})</span></h3>
+        ${ev.give.map(playerRow).join("") || '<div class="meta">(nothing matched)</div>'}
+      </div>
+      <div class="card">
+        <h3>You get <span class="meta">(${ev.get_value})</span></h3>
+        ${ev.get.map(playerRow).join("") || '<div class="meta">(nothing matched)</div>'}
+      </div>
+    </div>
+    <div class="card">
+      <div class="meta">Position changes: ${posChanges || "—"}</div>
+      <div class="needsurp">
+        <div><span class="label">Your needs</span> ${chips(ev.your_needs, "need", "none")}</div>
+        <div><span class="label">Your surplus</span> ${chips(ev.your_surplus, "surplus", "none")}</div>
+      </div>
+    </div>`;
+}
+
+function renderTrending(list, players, kind) {
+  if (!list || !list.length) {
+    return `<div class="card"><p class="meta">No trending ${esc(kind)} data right now.</p></div>`;
+  }
+  const rows = list
+    .map((row) => {
+      const b = playerBrief(row.player_id, players);
+      return `<div class="player">
+        <div class="player-id">${posBadge(b.pos)}
+          <span class="pname">${esc(b.name)}</span>
+          <span class="meta">${esc(b.team)}</span>
+          ${b.injury ? `<span class="inj">${esc(b.injury)}</span>` : ""}
+        </div>
+        <div class="pval">${kind === "add" ? "+" : "−"}${row.count.toLocaleString()}</div>
+      </div>`;
+    })
+    .join("");
+  return `<div class="card">
+    <h3>Trending ${kind === "add" ? "adds" : "drops"} <span class="meta">(last 24h, league-wide)</span></h3>
+    ${rows}
+  </div>`;
+}
+
+// --------------------------------------------------------------------------- //
+// UI wiring
+// --------------------------------------------------------------------------- //
+function readConfig() {
+  const saved = JSON.parse(localStorage.getItem("sta_config") || "null") || {};
+  return {
+    username: document.getElementById("username").value.trim() || saved.username || DEFAULT_CONFIG.username,
+    league_id: document.getElementById("league").value.trim() || saved.league_id || DEFAULT_CONFIG.league_id,
+    season: DEFAULT_CONFIG.season,
+  };
+}
+
+function saveConfig(cfg) {
+  localStorage.setItem("sta_config", JSON.stringify(cfg));
+}
+
+function setStatus(msg, kind) {
+  const el = document.getElementById("status");
+  el.className = "status" + (kind ? " " + kind : "");
+  el.innerHTML = msg;
+}
+
+function setResult(html) {
+  document.getElementById("result").innerHTML = html;
+}
+
+let activeTab = "team";
+
+async function run(tab) {
+  activeTab = tab;
+  document.querySelectorAll(".tab").forEach((b) =>
+    b.classList.toggle("active", b.dataset.tab === tab)
+  );
+  document.getElementById("evaluate-inputs").style.display =
+    tab === "evaluate" ? "flex" : "none";
+
+  const cfg = readConfig();
+  if (!cfg.username) {
+    setStatus("Enter your Sleeper username above.", "error");
+    return;
+  }
+  saveConfig(cfg);
+
+  setStatus(`<span class="spinner"></span> Loading… (first run fetches the full player list — a few seconds)`);
+  setResult("");
+
+  try {
+    if (tab === "trending-add" || tab === "trending-drop") {
+      const players = await loadPlayers();
+      const kind = tab === "trending-add" ? "add" : "drop";
+      const list = (await getTrending(kind, 24, 25)) || [];
+      setResult(renderTrending(list, players, kind));
+      setStatus("");
+      return;
+    }
+
+    const { analysis, myTeam } = await getContext(cfg);
+
+    if (tab === "team") {
+      setResult(renderTeam(analysis, myTeam));
+    } else if (tab === "league") {
+      setResult(renderLeague(analysis));
+    } else if (tab === "targets") {
+      setResult(renderTargets(findTargets(analysis, myTeam)));
+    } else if (tab === "evaluate") {
+      const giveNames = document.getElementById("give").value.split(",").map((s) => s.trim()).filter(Boolean);
+      const getNames = document.getElementById("get").value.split(",").map((s) => s.trim()).filter(Boolean);
+      if (!giveNames.length && !getNames.length) {
+        setStatus("Enter the players you'd give and get, then press Evaluate.", "");
+        setResult("");
+        return;
+      }
+      const g = resolvePlayersByName(giveNames, analysis);
+      const r = resolvePlayersByName(getNames, analysis);
+      const ev = evaluateTrade(g.resolved, r.resolved, myTeam);
+      setResult(renderEvaluation(ev, [...g.missing, ...r.missing]));
+    }
+    setStatus("");
+  } catch (e) {
+    if (e instanceof AdvisorError) {
+      setStatus(esc(e.message), "error");
+    } else {
+      setStatus("Unexpected error: " + esc(e.message || String(e)), "error");
+      console.error(e);
+    }
+    setResult("");
+  }
+}
+
+function init() {
+  const saved = JSON.parse(localStorage.getItem("sta_config") || "null") || {};
+  document.getElementById("username").value = saved.username || DEFAULT_CONFIG.username;
+  document.getElementById("league").value = saved.league_id || DEFAULT_CONFIG.league_id;
+
+  document.querySelectorAll(".tab").forEach((b) =>
+    b.addEventListener("click", () => run(b.dataset.tab))
+  );
+  document.getElementById("eval-run").addEventListener("click", () => run("evaluate"));
+  // Changing identity invalidates the cached analysis.
+  ["username", "league"].forEach((id) =>
+    document.getElementById(id).addEventListener("change", () => {
+      State.analysis = null;
+      State.analysisKey = null;
+    })
+  );
+
+  run("team");
+}
+
+document.addEventListener("DOMContentLoaded", init);
