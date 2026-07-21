@@ -294,7 +294,7 @@ async function analyzeLeague(league) {
     const surplus = [];
     for (const pos of CORE_POS) {
       const rank = t.pos_rank[pos];
-      const nStart = Math.max(1, dedicated[pos] + flexFor[pos]);
+      const nStart = realStartSlots(dedicated, flexFor, pos);
       const depth = t.pos_values[pos].filter((v) => v > 0).length;
       if (rank > nTeams * 0.6) {
         needs.push(pos);
@@ -395,8 +395,16 @@ function evaluateTrade(give, get, myTeam) {
 // --------------------------------------------------------------------------- //
 // Trade-target finder
 // --------------------------------------------------------------------------- //
+/** Realistic count of startable slots for a position: dedicated slots plus at
+ * most one flex spot. (Counting *every* flex slot toward *every* eligible
+ * position, as a naive sum would, makes "surplus" and "movable" almost
+ * impossible to reach, which is why trade targets used to come up empty.) */
+function realStartSlots(dedicated, flexFor, pos) {
+  return Math.max(1, (dedicated[pos] || 0) + Math.min(flexFor[pos] || 0, 1));
+}
+
 function bestSurplusPlayer(team, pos, analysis, nearValue) {
-  const keep = Math.max(1, analysis.dedicated[pos] + analysis.flexFor[pos]);
+  const keep = realStartSlots(analysis.dedicated, analysis.flexFor, pos);
   const pool = [...team.starters, ...team.bench]
     .filter((p) => p.pos === pos && p.value > 0)
     .sort((a, b) => b.value - a.value);
@@ -410,7 +418,27 @@ function bestSurplusPlayer(team, pos, analysis, nearValue) {
   return movable[0];
 }
 
+/** Players a team can plausibly move: depth beyond its startable slots at each
+ * position, falling back to its cheapest bench pieces if it has no real depth,
+ * so we always have something to offer. */
+function movablePlayers(team, analysis) {
+  const out = [];
+  for (const pos of CORE_POS) {
+    const keep = realStartSlots(analysis.dedicated, analysis.flexFor, pos);
+    const pool = [...team.starters, ...team.bench]
+      .filter((p) => p.pos === pos && p.value > 0)
+      .sort((a, b) => b.value - a.value);
+    out.push(...pool.slice(keep));
+  }
+  if (!out.length) {
+    const bench = [...team.bench].filter((p) => p.value > 0).sort((a, b) => a.value - b.value);
+    out.push(...bench.slice(0, 3));
+  }
+  return out.sort((a, b) => b.value - a.value);
+}
+
 function findTargets(analysis, myTeam, maxPartners = 4) {
+  // Primary pass: clean two-way swaps where each side fixes the other's need.
   const suggestions = [];
   for (const opp of analysis.teams) {
     if (opp.roster_id === myTeam.roster_id) continue;
@@ -436,8 +464,65 @@ function findTargets(analysis, myTeam, maxPartners = 4) {
       }
     }
   }
-  suggestions.sort((a, b) => Math.abs(a.value_gap) - Math.abs(b.value_gap));
-  return suggestions.slice(0, maxPartners * 2);
+  if (suggestions.length) {
+    suggestions.sort((a, b) => Math.abs(a.value_gap) - Math.abs(b.value_gap));
+    return suggestions.slice(0, maxPartners * 2);
+  }
+
+  // Fallback: no clean mutual match, so surface realistic *upgrade leads* — the
+  // best player another team could reasonably move at each of your neediest
+  // positions, paired with your most expendable near-value piece.
+  const tradeable = movablePlayers(myTeam, analysis);
+  if (!tradeable.length) return [];
+  const needs = myTeam.needs.length
+    ? myTeam.needs
+    : [...CORE_POS].sort((a, b) => myTeam.pos_rank[b] - myTeam.pos_rank[a]).slice(0, 2);
+
+  const leads = [];
+  const seen = new Set();
+  for (const needPos of needs) {
+    const myBest = Math.max(
+      0,
+      ...[...myTeam.starters, ...myTeam.bench]
+        .filter((p) => p.pos === needPos)
+        .map((p) => p.value)
+    );
+    const candidates = [];
+    for (const opp of analysis.teams) {
+      if (opp.roster_id === myTeam.roster_id) continue;
+      const pool = [...opp.starters, ...opp.bench]
+        .filter((p) => p.pos === needPos && p.value > 0)
+        .sort((a, b) => b.value - a.value);
+      // Skip each team's single best at the position — nobody trades their stud.
+      pool.slice(1).forEach((p) => candidates.push({ opp, p }));
+    }
+    candidates.sort((a, b) => b.p.value - a.p.value);
+    for (const { opp, p } of candidates) {
+      if (p.value <= myBest) continue; // must actually upgrade you
+      const key = `${opp.roster_id}:${p.name}`;
+      if (seen.has(key)) continue;
+      const offer = tradeable
+        .slice()
+        .sort((a, b) => Math.abs(a.value - p.value) - Math.abs(b.value - p.value))[0];
+      if (!offer) continue;
+      seen.add(key);
+      leads.push({
+        partner: opp.team_name,
+        partner_owner: opp.owner_name,
+        partner_record: opp.record,
+        you_get: p,
+        you_give: offer,
+        fills_your_need: needPos,
+        fills_their_need: offer.pos,
+        value_gap: p.value - offer.value,
+        lead: true,
+      });
+      if (leads.length >= maxPartners * 2) break;
+    }
+    if (leads.length >= maxPartners * 2) break;
+  }
+  leads.sort((a, b) => Math.abs(a.value_gap) - Math.abs(b.value_gap));
+  return leads.slice(0, maxPartners * 2);
 }
 
 // --------------------------------------------------------------------------- //
@@ -580,26 +665,38 @@ function renderLeague(analysis) {
 
 function renderTargets(suggestions) {
   if (!suggestions.length) {
-    return `<div class="card"><p class="meta">No clean complementary trade partners
-      found from surplus/need matching. Try the <b>League</b> tab to eyeball value
-      gaps, or evaluate a specific trade manually.</p></div>`;
+    return `<div class="card"><p class="meta">No trade leads to show — this usually
+      means your roster has no clear surplus to deal from, or the league's other
+      teams don't have an upgrade at your weak spots. Try the <b>League Market</b>
+      tab to eyeball value gaps, or use <b>Evaluate a Trade</b> to test a specific
+      idea.</p></div>`;
   }
-  return suggestions
+  const isLead = suggestions.some((s) => s.lead);
+  const intro = isLead
+    ? `<div class="card"><p class="meta">No perfectly balanced two-way swap right
+        now, so here are <b>upgrade leads</b>: the best players other teams could
+        realistically move at your neediest spots, paired with your most
+        expendable near-value piece. You'll usually add or adjust a bench piece to
+        even out the value — use <b>Evaluate a Trade</b> to fine-tune.</p></div>`
+    : "";
+  const cards = suggestions
     .map((s) => {
       const gap = s.value_gap;
-      const tilt =
-        Math.abs(gap) < 400 ? "even" : gap > 0 ? "you win" : "they win";
+      const tilt = Math.abs(gap) < 400 ? "even" : gap > 0 ? "you win" : "they win";
       const tiltCls = Math.abs(gap) < 400 ? "even" : gap > 0 ? "win" : "lose";
+      const giveLabel = s.lead
+        ? `You give &middot; expendable depth`
+        : `You give &middot; fills their ${esc(s.fills_their_need)}`;
       return `<div class="card target">
         <div class="target-head">With <b>${esc(s.partner)}</b>
           <span class="meta">(${esc(s.partner_owner)}, ${esc(s.partner_record)})</span></div>
         <div class="swap">
           <div class="swap-side get">
-            <div class="swap-label">You get &middot; fills your ${esc(s.fills_your_need)}</div>
+            <div class="swap-label">You get &middot; upgrades your ${esc(s.fills_your_need)}</div>
             ${playerRow(s.you_get)}
           </div>
           <div class="swap-side give">
-            <div class="swap-label">You give &middot; fills their ${esc(s.fills_their_need)}</div>
+            <div class="swap-label">${giveLabel}</div>
             ${playerRow(s.you_give)}
           </div>
         </div>
@@ -607,6 +704,7 @@ function renderTargets(suggestions) {
       </div>`;
     })
     .join("");
+  return intro + cards;
 }
 
 function renderEvaluation(ev, missing) {
