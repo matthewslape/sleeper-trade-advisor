@@ -325,7 +325,7 @@ button.primary:active { transform: translateY(1px); }
 .chip.muted { color: var(--muted); background: var(--surface-3); }
 
 /* ---------------------------------------------------------- League table */
-.table-wrap { overflow-x: auto; }
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
 table { width: 100%; border-collapse: collapse; font-size: 14px; }
 th, td { text-align: left; padding: 11px 8px; border-bottom: 1px solid var(--border); vertical-align: top; }
 th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--muted); font-weight: 700; }
@@ -380,8 +380,9 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-wei
 .wblock:last-child { margin-bottom: 0; }
 .wpos { font-size: 13px; font-weight: 700; color: var(--ink); margin: 4px 0 4px; }
 .wrow { display: flex; align-items: center; gap: 8px; padding: 5px 2px; font-size: 13.5px; }
-.wrank { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 20px; }
-.wname { font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.wrank { color: var(--muted); font-variant-numeric: tabular-nums; min-width: 18px; flex-shrink: 0; }
+/* min-width:0 lets a long name shrink + ellipsize instead of overflowing the row */
+.wname { font-weight: 600; color: var(--ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; flex: 0 1 auto; min-width: 0; }
 .rankbadge {
   font-size: 10px;
   font-weight: 700;
@@ -392,13 +393,13 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-wei
   letter-spacing: 0.02em;
   flex-shrink: 0;
 }
-.wowner { font-size: 11.5px; color: var(--muted); flex-shrink: 0; }
-.wspacer { flex: 1; }
+.wowner { font-size: 11.5px; color: var(--muted); flex-shrink: 1; min-width: 0; max-width: 90px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wspacer { flex: 1 1 8px; min-width: 6px; }
 .wtrend { font-size: 12px; font-weight: 700; color: var(--good); font-variant-numeric: tabular-nums; flex-shrink: 0; }
 .wval { font-variant-numeric: tabular-nums; font-weight: 700; color: var(--ink); flex-shrink: 0; }
 .wempty { padding: 4px 2px; }
 
-@media (max-width: 720px) {
+@media (max-width: 760px) {
   .waiver-grid { grid-template-columns: 1fr; }
 }
 
@@ -409,9 +410,37 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-wei
 
 /* ------------------------------------------------------------ Responsive */
 @media (max-width: 620px) {
+  .wrap { padding: 0 14px; }
   .rank-row { grid-template-columns: repeat(2, 1fr); }
   .swap, .eval-grid { grid-template-columns: 1fr; }
   .totval { text-align: left; }
   .head-top { flex-direction: column; }
   .site-header h1 { font-size: 16px; }
+  .card { padding: 16px 16px; }
+  .waiver-col { padding: 16px 14px; }
+}
+
+/* Small phones — shrink type and tighten spacing so nothing overflows. */
+@media (max-width: 430px) {
+  body { font-size: 13px; }
+  .tagline { display: none; }
+  .site-header .wrap { padding-top: 12px; padding-bottom: 12px; }
+  .brand-emoji { width: 36px; height: 36px; font-size: 18px; }
+  .config { gap: 10px; }
+  .field { min-width: 100%; }
+  .tabs { gap: 6px; margin: 14px 0 16px; }
+  .tab { padding: 7px 12px; font-size: 12.5px; }
+  .card { padding: 14px 14px; }
+  .card h2 { font-size: 18px; }
+  .totval-num { font-size: 24px; }
+  .rank-cell { padding: 10px; }
+  .rank-cell b { font-size: 16px; }
+  .player { padding: 8px 2px; }
+  .pname { font-size: 13.5px; }
+  .verdict-main { font-size: 20px; }
+  .waiver-col { padding: 14px 12px; }
+  .wrow { gap: 6px; font-size: 12.5px; }
+  .wowner { max-width: 70px; font-size: 10.5px; }
+  .rankbadge { font-size: 9.5px; }
+  th, td { padding: 9px 6px; font-size: 13px; }
 }
