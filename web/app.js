@@ -756,7 +756,27 @@ async function run(tab) {
   }
 }
 
+function setupThemeToggle() {
+  // The initial theme is applied before paint by the inline script in index.html;
+  // here we just flip and persist it on click.
+  const btn = document.getElementById("theme-toggle");
+  if (!btn) return;
+  btn.addEventListener("click", () => {
+    const current =
+      document.documentElement.getAttribute("data-theme") === "dark" ? "dark" : "light";
+    const next = current === "dark" ? "light" : "dark";
+    document.documentElement.setAttribute("data-theme", next);
+    try {
+      localStorage.setItem("sta_theme", next);
+    } catch (_e) {
+      /* ignore storage failures */
+    }
+  });
+}
+
 function init() {
+  setupThemeToggle();
+
   const saved = JSON.parse(localStorage.getItem("sta_config") || "null") || {};
   document.getElementById("username").value = saved.username || DEFAULT_CONFIG.username;
   document.getElementById("league").value = saved.league_id || DEFAULT_CONFIG.league_id;
