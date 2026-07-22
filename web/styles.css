@@ -114,6 +114,30 @@ body {
 .site-header h1 { margin: 0; font-size: 17px; font-weight: 700; letter-spacing: -0.01em; }
 .tagline { margin: 1px 0 0; color: var(--muted); font-size: 12.5px; }
 
+/* Header right-side actions */
+.header-actions { display: flex; align-items: center; gap: 10px; }
+
+/* Ask AI pill button */
+.ask-ai-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  height: 38px;
+  padding: 0 15px;
+  border-radius: 999px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 0.14s, border-color 0.14s, color 0.14s;
+}
+.ask-ai-btn svg { width: 16px; height: 16px; display: block; }
+.ask-ai-btn:hover { border-color: var(--link); color: var(--link); }
+.ask-ai-btn.active { background: var(--primary); border-color: var(--primary); color: var(--primary-ink); }
+
 /* Theme toggle (SnowUI icon-button) */
 .theme-toggle {
   width: 38px;
@@ -467,6 +491,9 @@ td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-wei
 @media (max-width: 430px) {
   body { font-size: 13px; }
   .tagline { display: none; }
+  .header-actions { gap: 8px; }
+  .ask-ai-btn { padding: 0; width: 38px; justify-content: center; }
+  .ask-ai-btn span { display: none; }
   .site-header .wrap { padding-top: 12px; padding-bottom: 12px; }
   .brand-emoji { width: 36px; height: 36px; font-size: 18px; }
   .config { gap: 10px; }
