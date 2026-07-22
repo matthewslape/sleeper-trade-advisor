@@ -64,6 +64,20 @@ ${context || "(no league data was provided)"}`;
 
 exports.handler = async (event) => {
   if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers: CORS, body: "" };
+
+  // Safe diagnostic: GET reports whether the deployed function can see the key
+  // (length only — never the value). Visit /.netlify/functions/chat to check.
+  if (event.httpMethod === "GET") {
+    const k = process.env.GROQ_API_KEY || "";
+    return json(200, {
+      ok: true,
+      configured: Boolean(k),
+      key_length: k.length,
+      model: process.env.GROQ_MODEL || DEFAULT_MODEL,
+      node: process.version,
+    });
+  }
+
   if (event.httpMethod !== "POST") return json(405, { error: "Method not allowed." });
 
   const key = process.env.GROQ_API_KEY;
