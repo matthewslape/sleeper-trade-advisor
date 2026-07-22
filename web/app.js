@@ -1056,6 +1056,8 @@ async function run(tab) {
   document.querySelectorAll(".tab").forEach((b) =>
     b.classList.toggle("active", b.dataset.tab === tab)
   );
+  const askBtn = document.getElementById("ask-ai-btn");
+  if (askBtn) askBtn.classList.toggle("active", tab === "chat");
   document.getElementById("evaluate-inputs").style.display =
     tab === "evaluate" ? "flex" : "none";
 
@@ -1151,6 +1153,8 @@ function init() {
   document.querySelectorAll(".tab").forEach((b) =>
     b.addEventListener("click", () => run(b.dataset.tab))
   );
+  const askBtn = document.getElementById("ask-ai-btn");
+  if (askBtn) askBtn.addEventListener("click", () => run("chat"));
   document.getElementById("eval-run").addEventListener("click", () => run("evaluate"));
   // Changing identity invalidates the cached analysis.
   ["username", "league"].forEach((id) =>
